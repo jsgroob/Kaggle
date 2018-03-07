@@ -1,0 +1,616 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r echo=FALSE, message=FALSE}
+require('tidyverse')
+require('ggridges')
+require('GGally')
+require('cowplot')
+
+```
+
+
+
+# Import Data
+```{r}
+wn_train <- read.csv('data/train.csv', header=TRUE, stringsAsFactors = FALSE)
+wn_test <- read.csv('data/test.csv', header=TRUE, stringsAsFactors = FALSE)
+
+weather <- read.csv('data/weather.csv', header=TRUE,na.strings = 'M', stringsAsFactors = FALSE)
+spray <- read.csv('data/spray.csv', header=TRUE, stringsAsFactors = FALSE)
+```
+
+
+
+
+# Inital Clean-up
+```{r, message=FALSE, warning=FALSE}
+
+spray <- unique(spray[,c('Date', 'Latitude', 'Longitude')]) %>%
+       mutate(
+              dayid = as.integer(gsub('[^0-9]','', Date))
+              , year = as.integer(substr(dayid, 1,4))
+              , month = as.integer(substr(dayid, 5,6))
+              , day = as.integer(substr(dayid, 7,8))
+              , Latitude = round(Latitude, 3) # roughly nearest 300ft
+              , Longitude = round(Longitude, 3) # roughly nearest 300ft
+       ) %>%
+       group_by(year, month, Latitude, Longitude) %>%
+       count() %>%
+       select(-n) %>%
+       rename(spray_lat = Latitude
+              , spray_long = Longitude)
+
+df_train <- wn_train %>% 
+       group_by(Date, Species, Trap, Latitude, Longitude) %>%
+       summarize(
+              NumMosquitos = sum(NumMosquitos)
+              , WnvPresent = max(WnvPresent)
+       ) %>%
+       mutate(
+              dayid = as.integer(gsub('[^0-9]','', Date))
+              , year = as.integer(substr(dayid, 1,4))
+              , month = as.integer(substr(dayid, 5,6))
+              , day = as.integer(substr(dayid, 7,8))
+              , isTrain = 1
+       )  %>%
+       ungroup() %>%
+       rownames_to_column(var='Id')
+
+df_test <- wn_test %>% 
+       mutate(
+              Trap_adjusted = ifelse(grepl('[^0-9]$', Trap, ignore.case=TRUE), sub('A$','',Trap),Trap)
+              , dayid = as.integer(gsub('[^0-9]','', Date))
+              , year = as.integer(substr(dayid, 1,4))
+              , month = as.integer(substr(dayid, 5,6))
+              , day = as.integer(substr(dayid, 7,8))
+              , isTrain = 0
+              , WnvPresent = 0
+       )
+
+year_monthly_weather <- weather %>%
+       mutate(
+            dayid = as.integer(gsub('[^0-9]','', Date))  
+            , year = as.integer(substr(dayid, 1,4))
+            , month = as.integer(substr(dayid, 5,6))
+       ) %>% 
+       group_by(year, month) %>%
+       summarize(
+              avg_temp = mean(Tavg, na.rm=TRUE)
+              , max_temp = max(Tmax, na.rm=TRUE)
+              , min_temp = min(Tmin, na.rm=TRUE)
+              #, mean_depart = mean(Depart, na.rm=TRUE)
+              , PrecipTotal = sum(as.numeric(ifelse(PrecipTotal=='T',0,PrecipTotal)), na.rm=TRUE)
+              , wind_speed = mean(AvgSpeed, na.rm=TRUE)
+       )
+
+monthly_weather <- weather %>%
+       mutate(
+            dayid = as.integer(gsub('[^0-9]','', Date))  
+            , year = as.integer(substr(dayid, 1,4))
+            , month = as.integer(substr(dayid, 5,6))
+       ) %>% 
+       group_by(month) %>%
+       summarize(
+              avg_temp = mean(Tavg, na.rm=TRUE)
+              , max_temp = max(Tmax, na.rm=TRUE)
+              , min_temp = min(Tmin, na.rm=TRUE)
+              #, mean_depart = mean(Depart, na.rm=TRUE)
+              , PrecipTotal = sum(as.numeric(ifelse(PrecipTotal=='T',0,PrecipTotal)), na.rm=TRUE)
+              , wind_speed = mean(AvgSpeed, na.rm=TRUE)
+       )
+
+# daily_weather <- weather %>%
+#        mutate(
+#             dayid = as.integer(gsub('[^0-9]','', Date))  
+#             , year = as.integer(substr(dayid, 1,4))
+#             , month = as.integer(substr(dayid, 5,6))
+#        ) %>% 
+#        group_by(dayid) %>%
+#        summarize(
+#               avg_temp = mean(Tavg, na.rm=TRUE)
+#               , max_temp = max(Tmax, na.rm=TRUE)
+#               , min_temp = min(Tmin, na.rm=TRUE)
+#               , mean_depart = mean(Depart, na.rm=TRUE)
+#               , PrecipTotal = sum(as.numeric(ifelse(PrecipTotal=='T',0,PrecipTotal)), na.rm=TRUE)
+#               , wind_speed = mean(AvgSpeed, na.rm=TRUE)
+#        )
+
+```
+
+
+
+
+# Initial EDA Plots
+
+## Exploring Year / Month / Year + Month impact
+
+### Year
+- Deploying less traps per year, but more efficient in placement
+- 2009 / 2011 are interesting, lower rates.
+
+```{r}
+
+yearly_summary <- df_train %>%
+       group_by(year) %>%
+       summarize(
+              num_samples = n()
+              , distinct_Traps = n_distinct(Trap)
+              , distinct_Wn_Traps = n_distinct(ifelse(WnvPresent>0,Trap,1)) - 1
+              , percent_positive_traps = distinct_Wn_Traps / distinct_Traps
+              , samples_per_Trap = n() /  n_distinct(Trap)
+              , west_nile_rate = mean(WnvPresent)
+              , avg_mosquitoes = mean(NumMosquitos)
+              , total_mosquitoes = sum(NumMosquitos)
+       ) %>% 
+       arrange(year)
+
+yearly_summary
+```
+
+### Monthly
+- Highest rates in August.  
+```{r}
+
+monthly_summary <- df_train %>%
+       group_by(month) %>%
+       summarize(
+              num_samples = n()
+              , distinct_Traps = n_distinct(Trap)
+              , distinct_Wn_Traps = n_distinct(ifelse(WnvPresent>0,Trap,1)) - 1
+              , percent_positive_traps = distinct_Wn_Traps / distinct_Traps
+              , samples_per_Trap = n() /  n_distinct(Trap)
+              , west_nile_rate = mean(WnvPresent)
+              , avg_mosquitoes = mean(NumMosquitos)
+              , total_mosquitoes = sum(NumMosquitos)
+       ) %>% 
+       arrange(month)
+
+monthly_summary
+```
+
+
+
+```{r}
+year_monthly_summary <- df_train %>%
+       group_by(year,month) %>%
+       summarize(
+              num_samples = n()
+              , distinct_Traps = n_distinct(Trap)
+              , distinct_Wn_Traps = n_distinct(ifelse(WnvPresent>0,Trap,1)) - 1
+              , percent_positive_traps = distinct_Wn_Traps / distinct_Traps
+              , samples_per_Trap = n() /  n_distinct(Trap)
+              , west_nile_rate = mean(WnvPresent)
+              , avg_mosquitoes = mean(NumMosquitos)
+              , total_mosquitoes = sum(NumMosquitos)
+       ) %>% 
+       arrange(year,month)
+
+year_monthly_summary
+```
+
+
+
+```{r}
+
+
+percent_positive_traps_plot <- ggplot(year_monthly_summary) +
+       geom_tile(aes(x=year, y=month, fill=percent_positive_traps))
+
+west_nile_rate_plot <- ggplot(year_monthly_summary) +
+       geom_tile(aes(x=year, y=month, fill=west_nile_rate))
+
+distinct_Traps_plot <- ggplot(year_monthly_summary) +
+       geom_tile(aes(x=year, y=month, fill=distinct_Traps))
+
+distinct_Wn_Traps_plot <- ggplot(year_monthly_summary) +
+       geom_tile(aes(x=year, y=month, fill=distinct_Wn_Traps))
+
+
+plot_grid(percent_positive_traps_plot
+          , west_nile_rate_plot
+          , distinct_Traps_plot
+          , distinct_Wn_Traps_plot)
+
+```
+
+
+## Monthly Temperatures
+```{r}
+
+temp_increment <- 2
+monthly_temp_summary <- df_train %>%
+       left_join(daily_weather, by = "dayid") %>%
+       mutate(
+              avg_temp_bucket = floor(avg_temp /temp_increment)*temp_increment
+       ) %>%
+       group_by(month, avg_temp_bucket) %>%
+       summarize(
+              num_samples = n()
+              , distinct_Traps = n_distinct(Trap)
+              , distinct_Wn_Traps = n_distinct(ifelse(WnvPresent>0,Trap,1)) - 1
+              , percent_positive_traps = distinct_Wn_Traps / distinct_Traps
+              , samples_per_Trap = n() /  n_distinct(Trap)
+              , west_nile_rate = mean(WnvPresent)
+              , avg_mosquitoes = mean(NumMosquitos)
+              , total_mosquitoes = sum(NumMosquitos)
+       ) %>% 
+       arrange(month, avg_temp_bucket)
+
+monthly_temp_summary
+```
+
+
+```{r}
+percent_positive_traps_plot_temp <- ggplot(monthly_temp_summary) +
+       geom_tile(aes(x=month, y=avg_temp_bucket, fill=percent_positive_traps))
+
+west_nile_rate_plot_temp <- ggplot(monthly_temp_summary) +
+       geom_tile(aes(x=month, y=avg_temp_bucket, fill=west_nile_rate))
+
+distinct_Traps_plot_temp <- ggplot(monthly_temp_summary) +
+       geom_tile(aes(x=month, y=avg_temp_bucket, fill=distinct_Traps))
+
+distinct_Wn_Traps_plot_temp <- ggplot(monthly_temp_summary) +
+       geom_tile(aes(x=month, y=avg_temp_bucket, fill=distinct_Wn_Traps))
+
+
+plot_grid(percent_positive_traps_plot_temp
+          , west_nile_rate_plot_temp
+          , distinct_Traps_plot_temp
+          , distinct_Wn_Traps_plot_temp)
+```
+
+
+## Summary By Type of Mosquito
+
+```{r}
+species_summary <- df_train %>%
+       group_by(Species) %>%
+       summarise(
+              num_samples = n()
+              , distinct_Traps = n_distinct(Trap)
+              , distinct_Wn_Traps = n_distinct(ifelse(WnvPresent>0,Trap,1)) - 1
+              , percent_positive_traps = distinct_Wn_Traps / distinct_Traps
+              , samples_per_Trap = n() /  n_distinct(Trap)
+              , west_nile_rate = mean(WnvPresent)
+              , avg_mosquitoes = mean(NumMosquitos)
+              , total_mosquitoes = sum(NumMosquitos)
+       )
+
+species_summary
+
+```
+
+# Finding Nearest Traps
+
+```{r}
+
+nearest_variables <- c('Trap', 'Latitude', 'Longitude')
+
+trap_locations <- unique(df_train[,nearest_variables]) %>% 
+       union_all(unique(df_test[,nearest_variables])) %>%
+       group_by(Trap) %>%
+       summarise(
+              Latitude = max(Latitude)
+              , Longitude = max(Longitude)
+       ) %>%
+       mutate(dummy=1) %>%
+       ungroup()
+
+
+trap_distances <- trap_locations %>%
+       left_join(trap_locations %>% 
+                        rename(second_Trap = Trap, second_lat = 'Latitude', second_long = 'Longitude')
+                 , by='dummy') %>%
+       filter(Trap != second_Trap) %>%
+       mutate(
+              distance = sqrt((Latitude - second_lat)^2 + (Longitude - second_long)^2)
+       ) %>%
+       select(Trap, second_Trap, distance) %>%
+       arrange(Trap, distance) %>%
+       group_by(Trap) %>%
+       mutate(
+              rank = row_number()
+       )
+```
+
+
+
+```{r}
+distance_plot <- trap_distances %>%
+       filter(rank <= 3) %>%
+       mutate(
+              distance_bucket = round(distance, 4)
+              , top_n = 3
+       ) %>% 
+       union_all(
+       trap_distances %>%
+       filter(rank <= 5) %>%
+       mutate(
+              distance_bucket = round(distance, 4)
+              , top_n = 5
+       )
+       ) %>% 
+       union_all(
+       trap_distances %>%
+       filter(rank <= 10) %>%
+       mutate(
+              distance_bucket = round(distance, 4)
+              , top_n = 10
+       )
+       ) %>% 
+       union_all(
+       trap_distances %>%
+       filter(rank <= 15) %>%
+       mutate(
+              distance_bucket = round(distance, 4)
+              , top_n = 15
+       )
+       )
+
+ggplot(distance_plot) +
+       geom_density(aes(x=distance_bucket, fill = as.factor(top_n)),alpha= 0.5)
+
+```
+
+
+```{r}
+top_n_distance <- 5
+quantile_to_use <- '90%'
+
+top_n_distances <- trap_distances %>%
+       filter(rank <= top_n_distance)
+ 
+probs = c(0, 0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1)
+distance_quantiles <- quantile(unlist(top_n_distances[,'distance']), probs = probs)
+
+nearest_neighbor_distance <- distance_quantiles[quantile_to_use][[1]]
+
+trap_distances <- trap_distances %>%
+       mutate(
+              isNear = ifelse(distance <= nearest_neighbor_distance,1,0)
+       )
+ 
+paste0("Nearest Neighbors Radius: ", round(nearest_neighbor_distance*69, 2), " miles")
+
+```
+
+
+
+
+
+
+```{r}
+colnames(df_train)
+```
+
+
+# Nearest Spray
+Note: Only spray data for two years (both train)
+Not sure this will be an easy feature to add
+```{r}
+
+train_spray <- df_train[,c("Species", "Trap", "dayid", "year", "month", "Latitude", "Longitude")] %>%
+       inner_join(spray, by = c('year' = 'year', 'month'='month')) %>%
+             mutate(
+              distance = sqrt((Latitude - spray_lat)^2 + (Longitude - spray_long)^2)
+       ) %>%
+       filter(distance <= nearest_neighbor_distance) %>%
+       group_by(Species, Trap, dayid) %>%
+       summarize(
+              num_near_spray = n()
+              , nearest_spray = min(distance)
+       )
+
+test_spray <- df_test[,c("Species", "Trap", "dayid", "year", "month", "Latitude", "Longitude")] %>%
+       inner_join(spray, by = c('year' = 'year', 'month'='month')) %>%
+             mutate(
+              distance = sqrt((Latitude - spray_lat)^2 + (Longitude - spray_long)^2)
+       ) %>%
+       filter(distance <= nearest_neighbor_distance) %>%
+       group_by(Species, Trap, dayid) %>%
+       summarize(
+              num_near_spray = n()
+              , nearest_spray = min(distance)
+       )
+
+```
+
+
+
+
+# Process Features
+
+Function to process raw data
+```{r}
+process_data <- function(df) {
+       
+       base_cols <- c("Id", "Date", "Species", "Trap", "dayid", "year", "month", "day", "isTrain", "WnvPresent")
+       
+       df_temp <- df[,base_cols] %>%
+       left_join(trap_distances[trap_distances$isNear == 1,], by="Trap") %>%
+       left_join(df_train[, c('Trap', 'dayid', 'year', 'month','day', 'NumMosquitos', 'WnvPresent')], by = c('second_Trap' = 'Trap')) %>%
+       filter(dayid.x > dayid.y & abs(year.x - year.y) <= 2 & year.x != year.y)  %>%
+       group_by(Id, Species, Trap, dayid.x, WnvPresent.x) %>%
+       summarize(
+              year = max(year.x, na.rm=TRUE)
+              , month = max(month.x, na.rm=TRUE)
+              , day = max(day.x, na.rm=TRUE)
+              , num_near_readings = n()
+              , num_near_Traps = n_distinct(second_Trap)
+              , num_near_Wn_Traps = n_distinct(ifelse(WnvPresent.y>0, second_Trap,1)) - 1
+              , pct_near_Wn_Traps = num_near_Wn_Traps / num_near_Traps
+              , is_Wn_near = max(WnvPresent.y, na.rm=TRUE)
+              , num_Wn_near_records = sum(WnvPresent.y, na.rm=TRUE)
+              , pct_Wn_near = sum(WnvPresent.y, na.rm=TRUE) / n()
+              , num_Wn_mosquitos = sum(ifelse(WnvPresent.y>0, NumMosquitos,0), na.rm=TRUE)
+              , num_mosquitos = sum(NumMosquitos, na.rm=TRUE)
+              , distances_nearest_Wn = min(ifelse(WnvPresent.y>0, distance,1), na.rm=TRUE)
+              , Wn_previous_location = max(ifelse(second_Trap == Trap, WnvPresent.y,0), na.rm=TRUE)
+       ) %>%
+       ungroup() %>%
+       rename(dayid = dayid.x, WnvPresent = WnvPresent.x) 
+       
+       mean_non_near_distance <- mean(trap_distances[trap_distances$isNear == 0,'distance'][[1]])
+       
+       df_temp_2 <- df[,base_cols] %>%
+              left_join(df_temp[,c(setdiff(colnames(df_temp),base_cols), 'Id')], by='Id') %>%
+              left_join(year_monthly_weather, by=c('year'='year', 'month'='month')) %>%
+              replace_na(replace = list(
+                  num_near_readings = 0
+                  , num_near_Traps = 0
+                  , num_near_Wn_Traps = 0
+                  , pct_near_Wn_Traps = 0
+                  , is_Wn_near = 0
+                  , num_Wn_near_records = 0
+                  , pct_Wn_near = 0
+                  , num_Wn_mosquitos = 0
+                  , num_mosquitos = 0
+                  , distances_nearest_Wn = mean_non_near_distance
+                  , Wn_previous_location = 0  
+                  
+              ))
+       
+       return(df_temp_2)
+}
+```
+
+
+
+
+
+Process data and create feature data frames for modeling
+
+```{r}
+df_train_features <- process_data(df_train)
+
+test_split_size <- floor(nrow(df_test) / 5)
+
+first <- seq(1, test_split_size)
+second <- seq(test_split_size +1, test_split_size*2)
+third <- seq(test_split_size*2 +1, test_split_size*3)
+fourth <- seq(test_split_size*3 +1, test_split_size*4)
+fifth <- seq(test_split_size*4 +1, nrow(df_test))
+
+df_test_features_1 <- process_data(df_test[first,])
+df_test_features_2 <- process_data(df_test[second,])
+df_test_features_3 <- process_data(df_test[third,])
+df_test_features_4 <- process_data(df_test[fourth,])
+df_test_features_5 <- process_data(df_test[fifth,])
+
+df_test_features <- df_test_features_1 %>%
+       union_all(df_test_features_2) %>%
+       union_all(df_test_features_3) %>%
+       union_all(df_test_features_4) %>%
+       union_all(df_test_features_5)
+
+rm(df_test_features_1)
+rm(df_test_features_2)
+rm(df_test_features_3)
+rm(df_test_features_4)
+rm(df_test_features_5)
+       
+
+```
+
+
+
+
+
+
+# Modelling
+
+Ideas:
+1. Adaboost 
+
+
+## Old Stuff
+```{r}
+base_cols <- c("Date", "Species", "Trap", "dayid", "year", "month", "day", "isTrain")
+
+df_train_features <- df_train[,base_cols] %>%
+       #union_all(df_test[,base_cols]) %>%
+       left_join(trap_distances[trap_distances$isNear == 1,], by="Trap") %>%
+       left_join(df_train[, c('Trap', 'dayid', 'year', 'month','day', 'NumMosquitos', 'WnvPresent')], by = c('second_Trap' = 'Trap')) %>%
+       filter(dayid.x > dayid.y, abs(year.x - year.y) <=2, year.x != year.y) %>%
+       group_by(Species, Trap, dayid.x) %>%
+       summarize(
+              year = max(year.x)
+              , month = max(month.x)
+              , day = max(day.x)
+              , num_near_readings = n()
+              , num_near_Traps = n_distinct(second_Trap)
+              , num_near_Wn_Traps = n_distinct(ifelse(WnvPresent>0, second_Trap,1)) - 1
+              , pct_near_Wn_Traps = num_near_Wn_Traps / num_near_Traps
+              , is_Wn_near = max(WnvPresent)
+              , num_Wn_near_records = sum(WnvPresent)
+              , pct_Wn_near = sum(WnvPresent) / n()
+              , num_Wn_mosquitos = sum(ifelse(WnvPresent>0, NumMosquitos,0))
+              , num_mosquitos = sum(NumMosquitos)
+              , distances_nearest_Wn = min(ifelse(WnvPresent>0, distance,1))
+              , Wn_previous_location = max(ifelse(second_Trap == Trap, WnvPresent,0))
+       ) %>%
+       ungroup() %>%
+       rename(dayid = dayid.x) %>%
+       left_join(year_monthly_weather, by=c('year'='year', 'month'='month'))
+
+
+
+
+#year_monthly_weather
+
+```
+
+
+
+## Finding the most recent nearest West Nile trap
+
+```{r}
+nearest_variables <- c('Trap','dayid', 'year', 'Latitude', 'Longitude')
+west_nile_location <- unique(df_train[df_train$WnvPresent == 1,c(nearest_variables, 'NumMosquitos')])
+colnames(west_nile_location) <- paste0('wn_', c(nearest_variables, 'NumMosquitos'))
+ 
+west_nile_distances <- unique(df_train[,nearest_variables]) %>% 
+       union_all(unique(df_test[,nearest_variables])) %>%
+       mutate(dummy = 1) %>%
+       left_join(west_nile_location %>% mutate(dummy = 1), by = 'dummy') %>%
+       filter(wn_dayid <= dayid, Trap != wn_Trap) %>%
+       group_by(Trap,dayid,year, wn_Trap) %>%
+       summarize(
+              max_wn_dayid = max(wn_dayid) 
+              , max_wn_year = max(wn_year) 
+              , Latitude = max(Latitude)
+              , Longitude = max(Longitude)
+              , wn_Latitude = max(wn_Latitude)
+              , wn_Longitude = max(wn_Longitude)
+       ) %>%
+        mutate(
+               distance = sqrt((Latitude - wn_Latitude)^2 + (Longitude - wn_Longitude)^2)
+        ) %>%
+       left_join(west_nile_location[,c('wn_dayid', 'wn_Trap', 'wn_NumMosquitos')]
+              , by = c('wn_Trap' = 'wn_Trap', 'max_wn_dayid' = 'wn_dayid')) 
+       
+
+
+
+```
+
+
+## Stats for nearest Trap with West Nile that occured BEFORE the current test
+```{r}
+nearest_west_nile <- west_nile_distances %>%
+       group_by(Trap, dayid) %>%
+       top_n(1,desc(distance))
+```
+
+# Find most recent Spray time per location
+```{r}
+
+```
+
+
+
+
