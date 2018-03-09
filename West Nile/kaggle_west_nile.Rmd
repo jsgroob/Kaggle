@@ -8,6 +8,8 @@ require('tidyverse')
 require('ggridges')
 require('GGally')
 require('cowplot')
+require('randomForest')
+require('xgboost')
 
 ```
 
@@ -15,11 +17,11 @@ require('cowplot')
 
 # Import Data
 ```{r}
-wn_train <- read.csv('data/train.csv', header=TRUE, stringsAsFactors = FALSE)
-wn_test <- read.csv('data/test.csv', header=TRUE, stringsAsFactors = FALSE)
+wn_train <- read.csv('train.csv', header=TRUE, stringsAsFactors = FALSE)
+wn_test <- read.csv('test.csv', header=TRUE, stringsAsFactors = FALSE)
 
-weather <- read.csv('data/weather.csv', header=TRUE,na.strings = 'M', stringsAsFactors = FALSE)
-spray <- read.csv('data/spray.csv', header=TRUE, stringsAsFactors = FALSE)
+weather <- read.csv('weather.csv', header=TRUE,na.strings = 'M', stringsAsFactors = FALSE)
+spray <- read.csv('spray.csv', header=TRUE, stringsAsFactors = FALSE)
 ```
 
 
@@ -102,21 +104,21 @@ monthly_weather <- weather %>%
               , wind_speed = mean(AvgSpeed, na.rm=TRUE)
        )
 
-# daily_weather <- weather %>%
-#        mutate(
-#             dayid = as.integer(gsub('[^0-9]','', Date))  
-#             , year = as.integer(substr(dayid, 1,4))
-#             , month = as.integer(substr(dayid, 5,6))
-#        ) %>% 
-#        group_by(dayid) %>%
-#        summarize(
-#               avg_temp = mean(Tavg, na.rm=TRUE)
-#               , max_temp = max(Tmax, na.rm=TRUE)
-#               , min_temp = min(Tmin, na.rm=TRUE)
-#               , mean_depart = mean(Depart, na.rm=TRUE)
-#               , PrecipTotal = sum(as.numeric(ifelse(PrecipTotal=='T',0,PrecipTotal)), na.rm=TRUE)
-#               , wind_speed = mean(AvgSpeed, na.rm=TRUE)
-#        )
+daily_weather <- weather %>%
+       mutate(
+            dayid = as.integer(gsub('[^0-9]','', Date))
+            , year = as.integer(substr(dayid, 1,4))
+            , month = as.integer(substr(dayid, 5,6))
+       ) %>%
+       group_by(dayid) %>%
+       summarize(
+              avg_temp = mean(Tavg, na.rm=TRUE)
+              , max_temp = max(Tmax, na.rm=TRUE)
+              , min_temp = min(Tmin, na.rm=TRUE)
+              , mean_depart = mean(Depart, na.rm=TRUE)
+              , PrecipTotal = sum(as.numeric(ifelse(PrecipTotal=='T',0,PrecipTotal)), na.rm=TRUE)
+              , wind_speed = mean(AvgSpeed, na.rm=TRUE)
+       )
 
 ```
 
@@ -285,7 +287,7 @@ species_summary
 ```
 
 # Finding Nearest Traps
-
+Looking at the distinct between each trap and it's N nearest neihbors
 ```{r}
 
 nearest_variables <- c('Trap', 'Latitude', 'Longitude')
@@ -356,7 +358,7 @@ ggplot(distance_plot) +
 
 ```
 
-
+Converting Nearest Neighbor radius from degress to miles
 ```{r}
 top_n_distance <- 5
 quantile_to_use <- '90%'
@@ -380,12 +382,6 @@ paste0("Nearest Neighbors Radius: ", round(nearest_neighbor_distance*69, 2), " m
 
 
 
-
-
-
-```{r}
-colnames(df_train)
-```
 
 
 # Nearest Spray
@@ -426,6 +422,8 @@ test_spray <- df_test[,c("Species", "Trap", "dayid", "year", "month", "Latitude"
 
 Function to process raw data
 ```{r}
+
+# TODO: optimize joins to make it run faster
 process_data <- function(df) {
        
        base_cols <- c("Id", "Date", "Species", "Trap", "dayid", "year", "month", "day", "isTrain", "WnvPresent")
@@ -449,7 +447,7 @@ process_data <- function(df) {
               , num_Wn_mosquitos = sum(ifelse(WnvPresent.y>0, NumMosquitos,0), na.rm=TRUE)
               , num_mosquitos = sum(NumMosquitos, na.rm=TRUE)
               , distances_nearest_Wn = min(ifelse(WnvPresent.y>0, distance,1), na.rm=TRUE)
-              , Wn_previous_location = max(ifelse(second_Trap == Trap, WnvPresent.y,0), na.rm=TRUE)
+              # , Wn_previous_location = max(ifelse(second_Trap == Trap, WnvPresent.y,0), na.rm=TRUE)
        ) %>%
        ungroup() %>%
        rename(dayid = dayid.x, WnvPresent = WnvPresent.x) 
@@ -470,9 +468,8 @@ process_data <- function(df) {
                   , num_Wn_mosquitos = 0
                   , num_mosquitos = 0
                   , distances_nearest_Wn = mean_non_near_distance
-                  , Wn_previous_location = 0  
-                  
-              ))
+                  # , Wn_previous_location = 0  
+              )) 
        
        return(df_temp_2)
 }
@@ -481,8 +478,8 @@ process_data <- function(df) {
 
 
 
-
 Process data and create feature data frames for modeling
+Note: Process data in batches to get it to run. 
 
 ```{r}
 df_train_features <- process_data(df_train)
@@ -512,10 +509,35 @@ rm(df_test_features_2)
 rm(df_test_features_3)
 rm(df_test_features_4)
 rm(df_test_features_5)
-       
+ 
+df_train_features$Species = as.factor(df_train_features$Species)
+df_train_features$WnvPresent = as.factor(df_train_features$WnvPresent)  
+df_train_features$month = as.factor(df_train_features$month)
+
+df_test_features$Species = as.factor(df_test_features$Species)
+df_test_features$WnvPresent = as.factor(df_test_features$WnvPresent)  
+df_test_features$month = as.factor(df_test_features$month)  
 
 ```
 
+
+
+```{r}
+df_train_features %>%
+     group_by(WnvPresent) %>%
+     summarise(
+          num_near_readings = mean(num_near_readings)
+          , num_near_Traps = mean(num_near_Traps)
+          , num_near_Wn_Traps = mean(num_near_Wn_Traps)
+          , num_mosquitos = mean(num_mosquitos)
+          , distances_nearest_Wn = mean(distances_nearest_Wn)
+          , avg_temp = mean(avg_temp)
+          , max_temp = mean(max_temp)
+          , PrecipTotal = mean(PrecipTotal)
+          
+     )
+
+```
 
 
 
@@ -524,92 +546,76 @@ rm(df_test_features_5)
 # Modelling
 
 Ideas:
-1. Adaboost 
+1. Random Forest
+2. Adaboost 
 
 
-## Old Stuff
+## Random Forest Model
+
+
+
+
 ```{r}
-base_cols <- c("Date", "Species", "Trap", "dayid", "year", "month", "day", "isTrain")
+base_cols <- c("Id", "Date", "Trap", "dayid", "year", "day", "isTrain", "WnvPresent", "Species", "month")
+pred_cols <- setdiff(colnames(df_train_features), base_cols)
+```
 
-df_train_features <- df_train[,base_cols] %>%
-       #union_all(df_test[,base_cols]) %>%
-       left_join(trap_distances[trap_distances$isNear == 1,], by="Trap") %>%
-       left_join(df_train[, c('Trap', 'dayid', 'year', 'month','day', 'NumMosquitos', 'WnvPresent')], by = c('second_Trap' = 'Trap')) %>%
-       filter(dayid.x > dayid.y, abs(year.x - year.y) <=2, year.x != year.y) %>%
-       group_by(Species, Trap, dayid.x) %>%
-       summarize(
-              year = max(year.x)
-              , month = max(month.x)
-              , day = max(day.x)
-              , num_near_readings = n()
-              , num_near_Traps = n_distinct(second_Trap)
-              , num_near_Wn_Traps = n_distinct(ifelse(WnvPresent>0, second_Trap,1)) - 1
-              , pct_near_Wn_Traps = num_near_Wn_Traps / num_near_Traps
-              , is_Wn_near = max(WnvPresent)
-              , num_Wn_near_records = sum(WnvPresent)
-              , pct_Wn_near = sum(WnvPresent) / n()
-              , num_Wn_mosquitos = sum(ifelse(WnvPresent>0, NumMosquitos,0))
-              , num_mosquitos = sum(NumMosquitos)
-              , distances_nearest_Wn = min(ifelse(WnvPresent>0, distance,1))
-              , Wn_previous_location = max(ifelse(second_Trap == Trap, WnvPresent,0))
-       ) %>%
-       ungroup() %>%
-       rename(dayid = dayid.x) %>%
-       left_join(year_monthly_weather, by=c('year'='year', 'month'='month'))
+### Trying default RF model.  
+
+Results not great...data may be too unbalanced
+```{r}
+
+rf_model <- randomForest(WnvPresent ~ . , data = df_train_features[,c('WnvPresent',pred_cols)]
+             , ntree = 1000
+             , nodesize = 5
+             )
+
+rf_model
+```
 
 
+### Random Forest on balanced data set
 
+```{r}
 
-#year_monthly_weather
+# TODO: Need to better test synthetic WestNile rates
+
+test <- df_train_features[,c('WnvPresent',pred_cols)]
+
+n <- 1000
+positive_data <- sample_n(test[test$WnvPresent ==1,],n,replace = TRUE)
+
+pct <- 0.3
+
+n_0 <- n/pct - n
+
+test <- rbind(sample_n(test[test$WnvPresent==0,],n_0,replace = TRUE)
+              , positive_data)
+
+rf_model2 <- randomForest(WnvPresent ~ . , data = test[,c('WnvPresent',pred_cols)]
+             , ntree = 1000
+             , nodesize = 20
+             )
+rf_model2
 
 ```
 
 
 
-## Finding the most recent nearest West Nile trap
-
 ```{r}
-nearest_variables <- c('Trap','dayid', 'year', 'Latitude', 'Longitude')
-west_nile_location <- unique(df_train[df_train$WnvPresent == 1,c(nearest_variables, 'NumMosquitos')])
-colnames(west_nile_location) <- paste0('wn_', c(nearest_variables, 'NumMosquitos'))
- 
-west_nile_distances <- unique(df_train[,nearest_variables]) %>% 
-       union_all(unique(df_test[,nearest_variables])) %>%
-       mutate(dummy = 1) %>%
-       left_join(west_nile_location %>% mutate(dummy = 1), by = 'dummy') %>%
-       filter(wn_dayid <= dayid, Trap != wn_Trap) %>%
-       group_by(Trap,dayid,year, wn_Trap) %>%
-       summarize(
-              max_wn_dayid = max(wn_dayid) 
-              , max_wn_year = max(wn_year) 
-              , Latitude = max(Latitude)
-              , Longitude = max(Longitude)
-              , wn_Latitude = max(wn_Latitude)
-              , wn_Longitude = max(wn_Longitude)
-       ) %>%
-        mutate(
-               distance = sqrt((Latitude - wn_Latitude)^2 + (Longitude - wn_Longitude)^2)
-        ) %>%
-       left_join(west_nile_location[,c('wn_dayid', 'wn_Trap', 'wn_NumMosquitos')]
-              , by = c('wn_Trap' = 'wn_Trap', 'max_wn_dayid' = 'wn_dayid')) 
-       
+test_predict <- predict(rf_model2, df_test_features[,pred_cols])
 
-
-
+table(test_predict)
 ```
 
 
-## Stats for nearest Trap with West Nile that occured BEFORE the current test
+
+
+
 ```{r}
-nearest_west_nile <- west_nile_distances %>%
-       group_by(Trap, dayid) %>%
-       top_n(1,desc(distance))
+varImpPlot(rf_model2)
 ```
 
-# Find most recent Spray time per location
-```{r}
-
-```
 
 
 
